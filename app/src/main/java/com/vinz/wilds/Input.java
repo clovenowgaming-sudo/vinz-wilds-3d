@@ -5,7 +5,7 @@ import android.view.MotionEvent;
 /**
  * Touch input. All coordinates are in "HUD units": screen height = 10 units,
  * width = 10 * aspect. Left side = floating joystick, right side = look drag,
- * plus FIRE / JUMP / RELOAD buttons.
+ * plus FIRE / JUMP / RELOAD buttons (and MIC / CHAT buttons in multiplayer).
  */
 final class Input {
     static final float H = 10f;
@@ -15,19 +15,21 @@ final class Input {
     float vw = 1f, vh = 1f;
     volatile float W = 20f;
     final float[] fire = new float[3], jump = new float[3], reload = new float[3];
+    final float[] mic = new float[3], chat = new float[3];
+    volatile boolean mp = false;
 
     volatile float moveX, moveY;
     volatile boolean firing, joyActive;
     volatile float joyCX = JOY_DEF_X, joyCY = JOY_DEF_Y, joyKX = JOY_DEF_X, joyKY = JOY_DEF_Y;
 
-    private boolean jumpQ, reloadQ, tapQ;
+    private boolean jumpQ, reloadQ, tapQ, micQ, chatQ;
     private float lookDX, lookDY;
     private int joyId = -1, lookId = -1, fireId = -1;
     private float lastX, lastY;
 
     // polled values (read by the game thread)
     float oLookX, oLookY;
-    boolean oJump, oReload, oTap;
+    boolean oJump, oReload, oTap, oMic, oChat;
 
     Input() {
         layout(20f);
@@ -45,6 +47,8 @@ final class Input {
         set(fire, w - 2.2f, H - 2.4f, 1.25f);
         set(jump, w - 4.9f, H - 1.5f, 0.95f);
         set(reload, w - 5.0f, H - 3.7f, 0.8f);
+        set(mic, 0.95f, 4.15f, 0.55f);
+        set(chat, 2.25f, 4.15f, 0.55f);
     }
 
     private static void set(float[] a, float x, float y, float r) {
@@ -103,6 +107,14 @@ final class Input {
         }
         if (hit(reload, x, y)) {
             reloadQ = true;
+            return;
+        }
+        if (mp && hit(mic, x, y)) {
+            micQ = true;
+            return;
+        }
+        if (mp && hit(chat, x, y)) {
+            chatQ = true;
             return;
         }
         if (x < W * 0.42f && joyId == -1) {
@@ -173,5 +185,9 @@ final class Input {
         reloadQ = false;
         oTap = tapQ;
         tapQ = false;
+        oMic = micQ;
+        micQ = false;
+        oChat = chatQ;
+        chatQ = false;
     }
 }

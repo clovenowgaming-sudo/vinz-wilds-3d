@@ -28,6 +28,7 @@ final class Game {
     boolean dead = false;
     float deadT = 0f;
     private boolean respawnSent = false;
+    boolean micToggleReq = false, chatReq = false;
 
     // world state
     float time = 0f, dayT = 0.06f;
@@ -121,6 +122,12 @@ final class Game {
         in.poll();
         time += dt;
         boolean mp = net != null;
+        if (mp) {
+            if (in.oMic) micToggleReq = true;
+            if (in.oChat) chatReq = true;
+            net.myX = px;
+            net.myZ = pz;
+        }
 
         if (mp) {
             long el = SystemClock.elapsedRealtimeNanos() - net.dayStampNs;

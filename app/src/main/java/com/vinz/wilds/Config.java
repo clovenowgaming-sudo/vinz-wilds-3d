@@ -50,7 +50,10 @@ final class Config {
         k.sound = sp.getBoolean("sound", true);
         k.sens = sp.getFloat("sens", 1f);
         String n = sp.getString("name", "");
-        if (n == null || n.trim().isEmpty()) n = "Player" + (int) (Math.random() * 900 + 100);
+        if (n == null || n.trim().isEmpty()) {
+            n = "Player" + (int) (Math.random() * 900 + 100);
+            sp.edit().putString("name", n).apply();
+        }
         k.name = n;
         String u = sp.getString("url", DEFAULT_URL);
         k.url = (u == null || u.trim().isEmpty()) ? DEFAULT_URL : u.trim();

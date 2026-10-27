@@ -1,29 +1,41 @@
 package com.vinz.wilds;
 
+import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.DialogInterface;
+import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.opengl.GLSurfaceView;
 import android.os.Build;
 import android.os.Bundle;
+import android.text.InputFilter;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
+import android.view.inputmethod.EditorInfo;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import javax.microedition.khronos.egl.EGL10;
 import javax.microedition.khronos.egl.EGLConfig;
 import javax.microedition.khronos.egl.EGLDisplay;
 
 public class GameActivity extends Activity {
+    private static final int REQ_MIC = 77;
+
     private GLSurfaceView glView;
     private final Input input = new Input();
     private TextView overlay;
     private Net net;
+    private VoiceChat voice;
     private boolean sized = false;
     private boolean paused = true;
+    private AlertDialog chatDialog;
 
     /** Picks an ES3 config, tries MSAA first when requested, falls back gracefully. */
     private static final class Chooser implements GLSurfaceView.EGLConfigChooser {
@@ -66,7 +78,11 @@ public class GameActivity extends Activity {
         final Config cfg = Config.load(this, mp);
         Sfx.enabled = cfg.sound;
         Sfx.init();
-        if (mp) net = new Net(cfg.url, cfg.name);
+        if (mp) {
+            net = new Net(cfg.url, cfg.name);
+            voice = new VoiceChat(net);
+            net.voice = voice;
+        }
         final float scale = Math.max(0.4f, Math.min(1f, cfg.res));
 
         FrameLayout root = new FrameLayout(this);
@@ -103,6 +119,26 @@ public class GameActivity extends Activity {
                     @Override
                     public void run() {
                         overlay.setText(s);
+                    }
+                });
+            }
+
+            @Override
+            public void chat() {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        showChatDialog();
+                    }
+                });
+            }
+
+            @Override
+            public void toggleMic() {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        onMicButton();
                     }
                 });
             }
@@ -152,6 +188,91 @@ public class GameActivity extends Activity {
         immersive();
     }
 
+    // ------------------------------------------------------------------ chat
+    private void showChatDialog() {
+        if (net == null || isFinishing()) return;
+        if (chatDialog != null && chatDialog.isShowing()) return;
+        final EditText et = new EditText(this);
+        et.setSingleLine(true);
+        et.setHint("Ketik pesan...");
+        et.setFilters(new InputFilter[]{new InputFilter.LengthFilter(120)});
+        et.setImeOptions(EditorInfo.IME_ACTION_SEND);
+        et.setPadding(48, 32, 48, 32);
+        chatDialog = new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                .setTitle("Chat")
+                .setView(et)
+                .setPositiveButton("Kirim", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int w) {
+                        sendChat(et.getText().toString());
+                    }
+                })
+                .setNegativeButton("Batal", null)
+                .create();
+        et.setOnEditorActionListener(new TextView.OnEditorActionListener() {
+            @Override
+            public boolean onEditorAction(TextView v, int actionId, android.view.KeyEvent ev) {
+                if (actionId == EditorInfo.IME_ACTION_SEND) {
+                    sendChat(et.getText().toString());
+                    chatDialog.dismiss();
+                    return true;
+                }
+                return false;
+            }
+        });
+        chatDialog.setOnDismissListener(new DialogInterface.OnDismissListener() {
+            @Override
+            public void onDismiss(DialogInterface d) {
+                immersive();
+            }
+        });
+        chatDialog.show();
+        et.requestFocus();
+        if (chatDialog.getWindow() != null) {
+            chatDialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE);
+        }
+    }
+
+    private void sendChat(String text) {
+        String t = text == null ? "" : text.trim();
+        if (!t.isEmpty() && net != null) net.sendChat(t);
+    }
+
+    // ------------------------------------------------------------------ microphone
+    private void onMicButton() {
+        if (net == null || voice == null) return;
+        if (net.micOn) {
+            setMic(false);
+            return;
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            setMic(true);
+        } else {
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_MIC);
+        }
+    }
+
+    private void setMic(boolean on) {
+        if (net == null || voice == null) return;
+        net.micDenied = false;
+        net.micOn = on;
+        voice.setMic(on);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
+        super.onRequestPermissionsResult(code, perms, res);
+        if (code == REQ_MIC) {
+            if (res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED) {
+                setMic(true);
+            } else {
+                if (net != null) net.micDenied = true;
+                Toast.makeText(this, "Izin mikrofon ditolak", Toast.LENGTH_SHORT).show();
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ lifecycle
     @SuppressWarnings("deprecation")
     private void immersive() {
         getWindow().getDecorView().setSystemUiVisibility(
@@ -181,13 +302,17 @@ public class GameActivity extends Activity {
     @Override
     protected void onPause() {
         glView.onPause();
-        if (net != null) net.pause();
+        if (net != null) {
+            setMic(false);
+            net.pause();
+        }
         paused = true;
         super.onPause();
     }
 
     @Override
     protected void onDestroy() {
+        if (voice != null) voice.release();
         if (net != null) net.close();
         Sfx.release();
         super.onDestroy();

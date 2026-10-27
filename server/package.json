@@ -4,7 +4,9 @@
   "description": "Multiplayer server for Vinz Wilds (runs in Termux, exposed via Cloudflare Tunnel)",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "restart": "sh run.sh",
+    "stop": "sh stop.sh"
   },
   "dependencies": {
     "ws": "^8.18.0"

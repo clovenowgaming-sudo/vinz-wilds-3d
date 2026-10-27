@@ -7,6 +7,7 @@ import android.graphics.Typeface;
 import android.opengl.GLES30;
 import android.opengl.GLUtils;
 import android.opengl.Matrix;
+import android.os.SystemClock;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -367,6 +368,37 @@ final class Hud {
         button(in.jump, "JUMP", false);
         button(in.reload, "R", g.reloadT > 0f);
 
+        // ---- multiplayer: mic / chat buttons, chat feed, who is talking
+        if (net != null) {
+            micButton(in.mic, net.micOn, net.micDenied);
+            button(in.chat, "CHAT", false);
+            int cn = net.chatSnapshot(chatLines, chatAges);
+            float cyl = 0.35f;
+            int maxc = Math.max(12, (int) ((W * 0.5f - 3.45f - 0.7f) / (0.27f * 0.58f)));
+            for (int i = 0; i < cn; i++) {
+                float age = chatAges[i];
+                if (age > 14f) continue;
+                float ca = age > 10f ? (14f - age) / 4f : 1f;
+                String cs = chatLines[i];
+                if (cs.length() > maxc) cs = cs.substring(0, maxc);
+                text(cs, 3.45f, cyl, 0.27f, 1f, 1f, 1f, ca, 0);
+                cyl += 0.34f;
+            }
+            long nowMs = SystemClock.elapsedRealtime();
+            StringBuilder who = new StringBuilder();
+            for (java.util.Map.Entry<Integer, Long> en : net.speaking.entrySet()) {
+                if (nowMs - en.getValue() > 500L) continue;
+                String nm = net.names.get(en.getKey());
+                if (who.length() > 0) who.append(", ");
+                who.append(nm != null ? nm : "P" + en.getKey());
+            }
+            if (who.length() > 0) {
+                String ws = "VOICE: " + who;
+                if (ws.length() > maxc) ws = ws.substring(0, maxc);
+                text(ws, 3.45f, cyl + 0.05f, 0.25f, 0.5f, 1f, 0.7f, 1f, 0);
+            }
+        }
+
         // ---- message / overlays
         if (g.msgT > 0f && !g.dead) {
             float a = Math.min(1f, g.msgT);
@@ -378,6 +410,18 @@ final class Hud {
             if (g.deadT > 1.2f) text("TAP TO RESPAWN", W * 0.5f, 5.4f, 0.55f, 1f, 1f, 1f, 0.9f, 1);
         }
         flush();
+    }
+
+    private final String[] chatLines = new String[8];
+    private final float[] chatAges = new float[8];
+
+    private void micButton(float[] b, boolean on, boolean denied) {
+        float r = on ? 0.2f : 0.9f, g = on ? 0.85f : 0.25f, bl = on ? 0.3f : 0.25f;
+        circle(b[0], b[1], b[2], 24, r, g, bl, on ? 0.55f : 0.35f);
+        ring(b[0], b[1], b[2], 0.06f, 24, 1f, 1f, 1f, 0.5f);
+        float th = b[2] * 0.55f;
+        text("MIC", b[0], b[1] - th * 0.8f, th, 1f, 1f, 1f, 0.95f, 1);
+        text(denied ? "DENIED" : (on ? "ON" : "OFF"), b[0], b[1] + th * 0.05f, th * 0.7f, 1f, 1f, 1f, 0.9f, 1);
     }
 
     private static float clamp01(float v) {

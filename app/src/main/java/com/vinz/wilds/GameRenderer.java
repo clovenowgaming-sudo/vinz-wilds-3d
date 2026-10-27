@@ -20,6 +20,10 @@ public final class GameRenderer implements GLSurfaceView.Renderer {
         void error(String s);
 
         void progress(String s);
+
+        void chat();
+
+        void toggleMic();
     }
 
     private final Config cfg;
@@ -69,6 +73,7 @@ public final class GameRenderer implements GLSurfaceView.Renderer {
         cfg = config;
         Q = config.q;
         in = input;
+        in.mp = config.mp;
         net = network;
         cb = callback;
     }
@@ -297,6 +302,14 @@ public final class GameRenderer implements GLSurfaceView.Renderer {
             cm.update(game.px, game.pz, dt, false);
             cm.uploadReady(Q == 0 ? 1 : 2);
             game.update(dt, in);
+            if (game.chatReq) {
+                game.chatReq = false;
+                cb.chat();
+            }
+            if (game.micToggleReq) {
+                game.micToggleReq = false;
+                cb.toggleMic();
+            }
             miniMap.tick(game.px, game.pz, dt);
             updateCamera();
             updateLighting();

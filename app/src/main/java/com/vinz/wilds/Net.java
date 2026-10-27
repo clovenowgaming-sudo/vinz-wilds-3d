@@ -5,6 +5,7 @@ import android.os.SystemClock;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.util.ArrayList;
 import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -18,8 +19,9 @@ import okhttp3.Request;
 import okhttp3.Response;
 import okhttp3.WebSocket;
 import okhttp3.WebSocketListener;
+import okio.ByteString;
 
-/** Multiplayer client (WebSocket, JSON). All state is exposed through thread-safe fields. */
+/** Multiplayer client (WebSocket: JSON text + binary voice frames). Thread-safe fields. */
 final class Net {
     static final class Remote {
         int id;
@@ -47,8 +49,14 @@ final class Net {
     volatile boolean connected = false, welcomed = false, died = false, spawnReady = false;
     volatile int myId = -1, online = 1, ping = -1, dayNum = 1;
     volatile float spawnX, spawnZ, dayT = 0.06f, hp = 100f, respX, respZ;
+    volatile float myX, myZ;
     volatile long dayStampNs = 0L;
     volatile String status = "CONNECTING...";
+
+    // voice
+    volatile VoiceChat voice;
+    volatile boolean micOn = false, micDenied = false;
+    final ConcurrentHashMap<Integer, Long> speaking = new ConcurrentHashMap<>();
 
     final ConcurrentHashMap<Integer, Remote> players = new ConcurrentHashMap<>();
     final ConcurrentHashMap<Integer, REnemy> enemies = new ConcurrentHashMap<>();
@@ -56,6 +64,10 @@ final class Net {
     final ConcurrentLinkedQueue<float[]> shots = new ConcurrentLinkedQueue<>();
     final ConcurrentLinkedQueue<String> messages = new ConcurrentLinkedQueue<>();
     final Set<Long> collected = ConcurrentHashMap.newKeySet();
+
+    // chat log (last 8 lines)
+    private final ArrayList<String> chatLines = new ArrayList<>();
+    private final ArrayList<Long> chatTs = new ArrayList<>();
 
     Net(String url, String name) {
         this.url = url;
@@ -84,6 +96,29 @@ final class Net {
         }
     }
 
+    // ------------------------------------------------------------------ chat log
+    synchronized void addChat(String s) {
+        chatLines.add(s);
+        chatTs.add(SystemClock.elapsedRealtime());
+        while (chatLines.size() > 8) {
+            chatLines.remove(0);
+            chatTs.remove(0);
+        }
+    }
+
+    /** Copies the newest chat lines (oldest first) and their age in seconds. Returns the count. */
+    synchronized int chatSnapshot(String[] lines, float[] age) {
+        long now = SystemClock.elapsedRealtime();
+        int n = Math.min(lines.length, chatLines.size());
+        int start = chatLines.size() - n;
+        for (int i = 0; i < n; i++) {
+            lines[i] = chatLines.get(start + i);
+            age[i] = (now - chatTs.get(start + i)) / 1000f;
+        }
+        return n;
+    }
+
+    // ------------------------------------------------------------------ connection
     synchronized void connect() {
         if (ws != null) {
             try {
@@ -106,13 +141,27 @@ final class Net {
             public void onOpen(WebSocket w, Response r) {
                 connected = true;
                 status = "JOINING...";
-                w.send("{\"t\":\"join\",\"name\":\"" + name + "\",\"v\":2}");
+                w.send("{\"t\":\"join\",\"name\":\"" + name + "\",\"v\":3}");
             }
 
             @Override
             public void onMessage(WebSocket w, String text) {
                 try {
                     handle(text);
+                } catch (Exception ignored) {
+                }
+            }
+
+            @Override
+            public void onMessage(WebSocket w, ByteString bytes) {
+                // voice frame: [1][id hi][id lo][160 x u-law]
+                try {
+                    if (bytes.size() == 163 && bytes.getByte(0) == 1) {
+                        int id = ((bytes.getByte(1) & 0xFF) << 8) | (bytes.getByte(2) & 0xFF);
+                        speaking.put(id, SystemClock.elapsedRealtime());
+                        VoiceChat v = voice;
+                        if (v != null) v.onFrame(id, bytes.toByteArray(), 3);
+                    }
                 } catch (Exception ignored) {
                 }
             }
@@ -246,14 +295,22 @@ final class Net {
             case "pj":
                 names.put(o.getInt("id"), o.getString("n"));
                 messages.add(o.getString("n") + " joined");
+                addChat("* " + o.getString("n") + " joined");
                 break;
             case "pl": {
                 int id = o.getInt("id");
                 String n = names.remove(id);
                 players.remove(id);
-                if (n != null) messages.add(n + " left");
+                speaking.remove(id);
+                if (n != null) {
+                    messages.add(n + " left");
+                    addChat("* " + n + " left");
+                }
                 break;
             }
+            case "chat":
+                addChat(o.optString("n", "?") + ": " + o.optString("m", ""));
+                break;
             case "shot":
                 shots.add(new float[]{(float) o.getDouble("ox"), (float) o.getDouble("oy"), (float) o.getDouble("oz"),
                         (float) o.getDouble("dx"), (float) o.getDouble("dy"), (float) o.getDouble("dz")});
@@ -277,6 +334,7 @@ final class Net {
                 break;
             case "msg":
                 messages.add(o.getString("m"));
+                addChat("* " + o.getString("m"));
                 break;
             case "po":
                 ping = (int) ((System.nanoTime() - o.getLong("c")) / 1000000L);
@@ -312,5 +370,20 @@ final class Net {
 
     void sendRespawn() {
         send("{\"t\":\"resp\"}");
+    }
+
+    void sendChat(String text) {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("t", "chat");
+            o.put("m", text);
+            send(o.toString());
+        } catch (Exception ignored) {
+        }
+    }
+
+    void sendVoice(byte[] packet) {
+        WebSocket w = ws;
+        if (connected && w != null) w.send(ByteString.of(packet));
     }
 }

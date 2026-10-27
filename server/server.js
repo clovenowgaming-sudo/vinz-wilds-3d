@@ -209,12 +209,46 @@ function handle(p, m) {
       send(p.ws, { t: 'spawn', x: SPAWN.x, z: SPAWN.z });
       break;
     }
+    case 'chat': {
+      if (!p.joined) return;
+      const nowC = Date.now();
+      if (nowC - (p.lastChat || 0) < 600) return;
+      p.lastChat = nowC;
+      const text = String(m.m || '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 120);
+      if (!text) return;
+      broadcast({ t: 'chat', id: p.id, n: p.name, m: text });
+      console.log(`[chat] ${p.name}: ${text}`);
+      break;
+    }
     case 'p': {
       send(p.ws, { t: 'po', c: m.c });
       break;
     }
     default:
       break;
+  }
+}
+
+// ------------------------------------------------------------------ proximity voice (binary frames)
+// client -> server: [1][160 x u-law]   server -> client: [1][id hi][id lo][160 x u-law]
+const VOICE_RANGE = 160;
+function handleVoice(p, data) {
+  if (!p.joined || !Buffer.isBuffer(data) || data.length !== 161 || data[0] !== 1) return;
+  const now = Date.now();
+  const tok = p.vTok === undefined ? 80 : p.vTok;
+  p.vTok = Math.min(80, tok + ((now - (p.vT || now)) / 1000) * 60);
+  p.vT = now;
+  if (p.vTok < 1) return;
+  p.vTok -= 1;
+  const out = Buffer.allocUnsafe(163);
+  out[0] = 1;
+  out[1] = (p.id >> 8) & 255;
+  out[2] = p.id & 255;
+  data.copy(out, 3, 1);
+  for (const q of players.values()) {
+    if (q === p || q.ws.readyState !== 1) continue;
+    const dx = q.x - p.x, dz = q.z - p.z;
+    if (dx * dx + dz * dz < VOICE_RANGE * VOICE_RANGE) q.ws.send(out, { binary: true });
   }
 }
 
@@ -352,7 +386,7 @@ setInterval(() => {
 // ------------------------------------------------------------------ http + websocket
 function statusJson() {
   return {
-    name: 'Vinz Wilds', version: 2, online: players.size, max: MAX_PLAYERS,
+    name: 'Vinz Wilds', version: 3, chat: true, voice: true, online: players.size, max: MAX_PLAYERS,
     day: dayNum, dayT: r2(dayT), enemies: enemies.size, pvp: false,
     uptime: Math.round((Date.now() - STARTED) / 1000), spawn: { x: r2(SPAWN.x), z: r2(SPAWN.z) },
   };
@@ -394,7 +428,7 @@ wss.on('connection', (ws) => {
     hp: 100, dead: false, kills: 0, tokens: 20, tokT: Date.now(), lastMsg: Date.now(), lastHurt: 0,
   };
   ws.on('message', (data, isBinary) => {
-    if (isBinary) return;
+    if (isBinary) { handleVoice(p, data); return; }
     let m;
     try { m = JSON.parse(data.toString()); } catch (e) { return; }
     if (m && typeof m === 'object') handle(p, m);
@@ -407,6 +441,16 @@ wss.on('connection', (ws) => {
     }
   });
   ws.on('error', () => {});
+});
+
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} sudah dipakai: server Vinz Wilds kemungkinan SUDAH JALAN di background.`);
+    console.error('Restart dengan:  sh run.sh     Stop dengan:  sh stop.sh');
+  } else {
+    console.error('Server error:', err.message);
+  }
+  process.exit(1);
 });
 
 server.listen(PORT, '127.0.0.1', () => {
