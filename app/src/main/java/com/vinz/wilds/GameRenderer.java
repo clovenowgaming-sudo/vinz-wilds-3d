@@ -1,7 +1,5 @@
 package com.vinz.wilds;
 
-import android.graphics.Bitmap;
-import android.graphics.Color;
 import android.opengl.GLES30;
 import android.opengl.GLSurfaceView;
 import android.opengl.Matrix;
@@ -10,43 +8,52 @@ import android.os.SystemClock;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
-import java.nio.IntBuffer;
 
 import javax.microedition.khronos.egl.EGLConfig;
 import javax.microedition.khronos.opengles.GL10;
 
-/** Renders the whole game with OpenGL ES 3.0. Q: 0 low, 1 medium, 2 extreme. */
+/** Renders the streamed world with OpenGL ES 3.0. Q: 0 low, 1 medium, 2 extreme. */
 public final class GameRenderer implements GLSurfaceView.Renderer {
     interface Callback {
         void ready();
 
         void error(String s);
+
+        void progress(String s);
     }
 
+    private final Config cfg;
     private final int Q;
     private final Input in;
+    private final Net net;
     private final Callback cb;
+
     private World world;
     private Game game;
+    private ChunkManager cm;
     private Hud hud;
-    private boolean failed = false, readyFired = false;
+    private MiniMap miniMap;
+    private boolean failed = false, readyFired = false, started = false, spawned = false;
+    private int lastPct = -1;
+    private float loadTime = 0f;
 
     private int W = 1, H = 1;
     private float aspect = 2f;
 
     private Prog pTerr, pObj, pWater, pSky, pGun, pShTerr, pShObj, pBright, pBlur, pComp;
-    private int tVao, tVbo, tIbo, tIdx;
-    private Geo gPine, gOak, gRock, gGrass, gCrystal, gWraith, gBrute, gBolt, gGun;
-    private int waterVao, waterVbo, emptyVao;
-    private int texHeight, texShadow, fboShadow;
+    private Geo gPine, gOak, gRock, gGrass, gCrystal, gWraith, gBrute, gBolt, gGun, gAvatar;
+    private int emptyVao;
+    private int texShadow, fboShadow;
     private int fboScene, texScene, rboScene, fboB1, texB1, fboB2, texB2, bw, bh;
+    private boolean shadowOn;
     private int shadowSize;
-    private float shadowR;
+    private float shadowR, viewDist, treeCull, grassCull;
 
     private final float[] proj = new float[16], view = new float[16], vp = new float[16], invVp = new float[16];
     private final float[] lightVP = new float[16], lv = new float[16], lp = new float[16];
     private final float[] gunProj = new float[16], gunM = new float[16];
     private final float[] tmp4 = new float[4], tmpO = new float[4], tmpL = new float[4];
+    private final float[] planes = new float[24];
 
     // lighting state
     private final float[] sunD = new float[3], lightD = new float[3], lightC = new float[3];
@@ -58,9 +65,11 @@ public final class GameRenderer implements GLSurfaceView.Renderer {
     private float fpsAcc = 0f, fps = 0f;
     private int fpsFrames = 0;
 
-    GameRenderer(int quality, Input input, Callback callback) {
-        Q = quality;
+    GameRenderer(Config config, Input input, Net network, Callback callback) {
+        cfg = config;
+        Q = config.q;
         in = input;
+        net = network;
         cb = callback;
     }
 
@@ -72,9 +81,10 @@ public final class GameRenderer implements GLSurfaceView.Renderer {
             failed = false;
         } catch (Throwable t) {
             failed = true;
-            String m = t.getClass().getSimpleName() + ": " + t.getMessage();
-            if (cb != null) cb.error(m);
+            if (cb != null) cb.error(t.getClass().getSimpleName() + ": " + t.getMessage());
         }
+        started = false;
+        lastPct = -1;
         last = SystemClock.elapsedRealtimeNanos();
     }
 
@@ -98,19 +108,29 @@ public final class GameRenderer implements GLSurfaceView.Renderer {
         GLES30.glEnable(GLES30.GL_DEPTH_TEST);
         GLES30.glDepthFunc(GLES30.GL_LEQUAL);
         GLES30.glDisable(GLES30.GL_CULL_FACE);
+
+        shadowOn = cfg.shadows && Q > 0;
+        shadowSize = Q == 2 ? 2048 : 1024;
+        shadowR = Q == 2 ? 70f : 55f;
+        float vm = Math.max(0.5f, Math.min(1.5f, cfg.view));
+        viewDist = (Q == 0 ? 700f : Q == 1 ? 1100f : 1800f) * vm;
+        treeCull = (Q == 0 ? 220f : Q == 1 ? 320f : 450f) * Math.min(vm, 1.3f);
+        grassCull = Q == 1 ? 38f : 62f;
+
         if (world == null) {
             world = new World(Q);
-            game = new Game(world, Q);
+            game = new Game(world, cfg, net);
         }
-        shadowSize = Q == 2 ? 2048 : Q == 1 ? 1024 : 0;
-        shadowR = Q == 2 ? 70f : 55f;
+        if (cm != null) cm.dispose();
+        cm = new ChunkManager(world, Q, viewDist, treeCull + 130f, Q == 1 ? 150f : 220f, cfg.grass && Q >= 1);
+        game.cm = cm;
 
         pTerr = new Prog(Shaders.VH + Shaders.TERRAIN_VS, Shaders.FH + Shaders.COMMON + Shaders.TERRAIN_FS);
         pObj = new Prog(Shaders.VH + Shaders.OBJ_VS, Shaders.FH + Shaders.COMMON + Shaders.OBJ_FS);
         pWater = new Prog(Shaders.VH + Shaders.WATER_VS, Shaders.FH + Shaders.COMMON + Shaders.WATER_FS);
         pSky = new Prog(Shaders.VH + Shaders.SKY_VS, Shaders.FH + Shaders.COMMON + Shaders.SKY_FS);
         pGun = new Prog(Shaders.VH + Shaders.GUN_VS, Shaders.FH + Shaders.GUN_FS);
-        if (Q > 0) {
+        if (shadowOn) {
             pShTerr = new Prog(Shaders.VH + Shaders.SH_TERR_VS, Shaders.SH_FS);
             pShObj = new Prog(Shaders.VH + "#define SHADOW\n" + Shaders.OBJ_VS, Shaders.SH_FS);
         }
@@ -120,144 +140,30 @@ public final class GameRenderer implements GLSurfaceView.Renderer {
             pComp = new Prog(Shaders.VH + Shaders.QUAD_VS, Shaders.FH + Shaders.COMP_FS);
         }
 
-        buildTerrain();
         buildGeometry();
-        buildTextures();
-        if (Q > 0) buildShadowTarget();
+        if (shadowOn) buildShadowTarget();
 
         int[] t = new int[1];
         GLES30.glGenVertexArrays(1, t, 0);
         emptyVao = t[0];
 
         hud = new Hud();
-        hud.init(buildMinimap());
+        hud.init();
+        miniMap = new MiniMap(world, hud);
     }
 
     // ---------------------------------------------------------------------------------- geometry
-    private void buildTerrain() {
-        int cells = Q == 2 ? 256 : Q == 1 ? 192 : 128;
-        int n = cells + 1;
-        float step = World.SIZE / cells;
-        float[] hg = new float[n * n];
-        for (int j = 0; j < n; j++) {
-            for (int i = 0; i < n; i++) {
-                hg[j * n + i] = world.height(-World.HALF + i * step, -World.HALF + j * step);
-            }
-        }
-        float[] vb = new float[n * n * 6];
-        for (int j = 0; j < n; j++) {
-            for (int i = 0; i < n; i++) {
-                int il = Math.max(i - 1, 0), ir = Math.min(i + 1, n - 1);
-                int jd = Math.max(j - 1, 0), ju = Math.min(j + 1, n - 1);
-                float gx = (hg[j * n + ir] - hg[j * n + il]) / ((ir - il) * step);
-                float gz = (hg[ju * n + i] - hg[jd * n + i]) / ((ju - jd) * step);
-                float nx = -gx, ny = 1f, nz = -gz;
-                float l = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
-                int o = (j * n + i) * 6;
-                vb[o] = -World.HALF + i * step;
-                vb[o + 1] = hg[j * n + i];
-                vb[o + 2] = -World.HALF + j * step;
-                vb[o + 3] = nx / l;
-                vb[o + 4] = ny / l;
-                vb[o + 5] = nz / l;
-            }
-        }
-        int[] ib = new int[cells * cells * 6];
-        int k = 0;
-        for (int j = 0; j < cells; j++) {
-            for (int i = 0; i < cells; i++) {
-                int a = j * n + i, b = a + 1, c = a + n, d = c + 1;
-                ib[k++] = a;
-                ib[k++] = c;
-                ib[k++] = b;
-                ib[k++] = b;
-                ib[k++] = c;
-                ib[k++] = d;
-            }
-        }
-        tIdx = ib.length;
-        int[] t = new int[1];
-        GLES30.glGenVertexArrays(1, t, 0);
-        tVao = t[0];
-        GLES30.glBindVertexArray(tVao);
-        GLES30.glGenBuffers(1, t, 0);
-        tVbo = t[0];
-        FloatBuffer fb = ByteBuffer.allocateDirect(vb.length * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
-        fb.put(vb);
-        fb.position(0);
-        GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, tVbo);
-        GLES30.glBufferData(GLES30.GL_ARRAY_BUFFER, vb.length * 4, fb, GLES30.GL_STATIC_DRAW);
-        GLES30.glEnableVertexAttribArray(0);
-        GLES30.glVertexAttribPointer(0, 3, GLES30.GL_FLOAT, false, 24, 0);
-        GLES30.glEnableVertexAttribArray(1);
-        GLES30.glVertexAttribPointer(1, 3, GLES30.GL_FLOAT, false, 24, 12);
-        GLES30.glGenBuffers(1, t, 0);
-        tIbo = t[0];
-        IntBuffer ibb = ByteBuffer.allocateDirect(ib.length * 4).order(ByteOrder.nativeOrder()).asIntBuffer();
-        ibb.put(ib);
-        ibb.position(0);
-        GLES30.glBindBuffer(GLES30.GL_ELEMENT_ARRAY_BUFFER, tIbo);
-        GLES30.glBufferData(GLES30.GL_ELEMENT_ARRAY_BUFFER, ib.length * 4, ibb, GLES30.GL_STATIC_DRAW);
-        GLES30.glBindVertexArray(0);
-    }
-
     private void buildGeometry() {
-        gPine = new Geo(Meshes.pine(Q), Math.max(1, world.nPines));
-        gPine.setInstances(world.pines, world.nPines);
-        gOak = new Geo(Meshes.oak(Q), Math.max(1, world.nOaks));
-        gOak.setInstances(world.oaks, world.nOaks);
-        gRock = new Geo(Meshes.rock(Q), Math.max(1, world.nRocks));
-        gRock.setInstances(world.rocks, world.nRocks);
-        if (Q >= 1 && world.nGrass > 0) {
-            gGrass = new Geo(Meshes.grass(), world.nGrass);
-            gGrass.setInstances(world.grass, world.nGrass);
-        }
-        gCrystal = new Geo(Meshes.crystal(), Game.NC);
+        gPine = new Geo(Meshes.pine(Q), cm.gP.length / 5);
+        gOak = new Geo(Meshes.oak(Q), cm.gO.length / 5);
+        gRock = new Geo(Meshes.rock(Q), cm.gR.length / 5);
+        gGrass = (Q >= 1 && cfg.grass) ? new Geo(Meshes.grass(), cm.gG.length / 5) : null;
+        gCrystal = new Geo(Meshes.crystal(), 16);
         gWraith = new Geo(Meshes.enemy(false), Game.MAXE);
         gBrute = new Geo(Meshes.enemy(true), Game.MAXE);
         gBolt = new Geo(Meshes.bolt(), Game.MAXB);
+        gAvatar = new Geo(Meshes.avatar(), Game.MAXP);
         gGun = new Geo(Meshes.gun(), 0);
-
-        float e = 2000f;
-        float[] wq = {-e, 0f, -e, e, 0f, -e, -e, 0f, e, e, 0f, e};
-        int[] t = new int[1];
-        GLES30.glGenVertexArrays(1, t, 0);
-        waterVao = t[0];
-        GLES30.glBindVertexArray(waterVao);
-        GLES30.glGenBuffers(1, t, 0);
-        waterVbo = t[0];
-        FloatBuffer fb = ByteBuffer.allocateDirect(wq.length * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
-        fb.put(wq);
-        fb.position(0);
-        GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, waterVbo);
-        GLES30.glBufferData(GLES30.GL_ARRAY_BUFFER, wq.length * 4, fb, GLES30.GL_STATIC_DRAW);
-        GLES30.glEnableVertexAttribArray(0);
-        GLES30.glVertexAttribPointer(0, 3, GLES30.GL_FLOAT, false, 12, 0);
-        GLES30.glBindVertexArray(0);
-    }
-
-    private void buildTextures() {
-        int hs = 256;
-        float[] hd = new float[hs * hs];
-        for (int j = 0; j < hs; j++) {
-            for (int i = 0; i < hs; i++) {
-                float x = -World.HALF + (i + 0.5f) / hs * World.SIZE;
-                float z = -World.HALF + (j + 0.5f) / hs * World.SIZE;
-                hd[j * hs + i] = world.height(x, z);
-            }
-        }
-        FloatBuffer fb = ByteBuffer.allocateDirect(hd.length * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
-        fb.put(hd);
-        fb.position(0);
-        int[] t = new int[1];
-        GLES30.glGenTextures(1, t, 0);
-        texHeight = t[0];
-        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, texHeight);
-        GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_R16F, hs, hs, 0, GLES30.GL_RED, GLES30.GL_FLOAT, fb);
-        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR);
-        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR);
-        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE);
-        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE);
     }
 
     private void buildShadowTarget() {
@@ -331,36 +237,43 @@ public final class GameRenderer implements GLSurfaceView.Renderer {
         fboB2 = makeFbo(texB2, 0);
     }
 
-    private Bitmap buildMinimap() {
-        int n = 128;
-        Bitmap bmp = Bitmap.createBitmap(n, n, Bitmap.Config.ARGB_8888);
-        for (int j = 0; j < n; j++) {
-            for (int i = 0; i < n; i++) {
-                float x = -World.HALF + (i + 0.5f) / n * World.SIZE;
-                float z = World.HALF - (j + 0.5f) / n * World.SIZE;
-                float h = world.height(x, z);
-                float hx = world.height(x + 5f, z);
-                float shade = Math.max(0.6f, Math.min(1.35f, 1f + (hx - h) * 0.06f));
-                float r, g, b;
-                if (h < -6f) { r = 0.04f; g = 0.12f; b = 0.30f; }
-                else if (h < 0f) { r = 0.10f; g = 0.36f; b = 0.52f; }
-                else if (h < 1.6f) { r = 0.76f; g = 0.70f; b = 0.50f; }
-                else if (h < 26f) { r = 0.16f + h * 0.003f; g = 0.38f - h * 0.004f; b = 0.12f; }
-                else if (h < 46f) { r = 0.45f; g = 0.43f; b = 0.40f; }
-                else { r = 0.92f; g = 0.94f; b = 0.97f; }
-                if (h >= 0f) { r *= shade; g *= shade; b *= shade; }
-                bmp.setPixel(i, j, Color.rgb(clamp255(r), clamp255(g), clamp255(b)));
-            }
-        }
-        return bmp;
-    }
-
-    private static int clamp255(float v) {
-        int i = (int) (v * 255f);
-        return i < 0 ? 0 : Math.min(i, 255);
-    }
-
     // ---------------------------------------------------------------------------------- per-frame
+    private boolean loadStep(float dt) {
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0);
+        GLES30.glViewport(0, 0, W, H);
+        GLES30.glClearColor(0f, 0f, 0f, 1f);
+        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT | GLES30.GL_DEPTH_BUFFER_BIT);
+        loadTime += dt;
+        if (net != null && !spawned) {
+            if (!net.welcomed) {
+                if (lastPct != -2) {
+                    lastPct = -2;
+                    cb.progress("CONNECTING TO SERVER...");
+                }
+                if (loadTime > 15f) {
+                    failed = true;
+                    cb.error("Tidak bisa konek ke server:\n" + cfg.url + "\n(" + net.status + ")\n\nPastikan server jalan dan route Cloudflare sudah benar.");
+                }
+                return false;
+            }
+            game.setSpawn(net.spawnX, net.spawnZ);
+            spawned = true;
+            loadTime = 0f;
+        }
+        cm.update(game.px, game.pz, dt, true);
+        cm.uploadReady(4);
+        int pct = cm.progress(game.px, game.pz, 300f);
+        if (pct != lastPct) {
+            lastPct = pct;
+            cb.progress("LOADING WORLD " + pct + "%");
+        }
+        if (pct >= 100 || loadTime > 90f) {
+            started = true;
+            return true;
+        }
+        return false;
+    }
+
     @Override
     public void onDrawFrame(GL10 gl10) {
         if (failed) {
@@ -372,18 +285,29 @@ public final class GameRenderer implements GLSurfaceView.Renderer {
         float dt = (now - last) / 1e9f;
         last = now;
         if (dt > 0.1f || dt < 0f) dt = 0.016f;
-        fpsAcc += dt;
-        fpsFrames++;
-        if (fpsAcc >= 0.5f) {
-            fps = fpsFrames / fpsAcc;
-            fpsAcc = 0f;
-            fpsFrames = 0;
-        }
         try {
+            if (!started && !loadStep(dt)) return;
+            fpsAcc += dt;
+            fpsFrames++;
+            if (fpsAcc >= 0.5f) {
+                fps = fpsFrames / fpsAcc;
+                fpsAcc = 0f;
+                fpsFrames = 0;
+            }
+            cm.update(game.px, game.pz, dt, false);
+            cm.uploadReady(Q == 0 ? 1 : 2);
             game.update(dt, in);
+            miniMap.tick(game.px, game.pz, dt);
             updateCamera();
             updateLighting();
-            if (Q > 0) renderShadow();
+            if (cm.gatherDue(game.px, game.pz)) {
+                cm.gather(game.px, game.pz, treeCull, grassCull);
+                gPine.setInstances(cm.gP, cm.nP);
+                gOak.setInstances(cm.gO, cm.nO);
+                gRock.setInstances(cm.gR, cm.nR);
+                if (gGrass != null) gGrass.setInstances(cm.gG, cm.nG);
+            }
+            if (shadowOn) renderShadow();
             renderMain();
             if (Q == 2) post();
             renderHud();
@@ -403,9 +327,41 @@ public final class GameRenderer implements GLSurfaceView.Renderer {
         float cp = (float) Math.cos(game.pitch);
         float fx = cp * (float) Math.sin(game.yaw), fy = (float) Math.sin(game.pitch), fz = cp * (float) Math.cos(game.yaw);
         Matrix.setLookAtM(view, 0, ex, ey, ez, ex + fx, ey + fy, ez + fz, 0f, 1f, 0f);
-        Matrix.perspectiveM(proj, 0, 56f, aspect, 0.2f, 650f);
+        Matrix.perspectiveM(proj, 0, 56f, aspect, 0.25f, viewDist + 500f);
         Matrix.multiplyMM(vp, 0, proj, 0, view, 0);
         Matrix.invertM(invVp, 0, vp, 0);
+        extractPlanes(vp);
+    }
+
+    private void extractPlanes(float[] m) {
+        for (int i = 0; i < 3; i++) {
+            for (int s = 0; s < 2; s++) {
+                float sg = s == 0 ? 1f : -1f;
+                int o = (i * 2 + s) * 4;
+                planes[o] = m[3] + sg * m[i];
+                planes[o + 1] = m[7] + sg * m[4 + i];
+                planes[o + 2] = m[11] + sg * m[8 + i];
+                planes[o + 3] = m[15] + sg * m[12 + i];
+                float l = (float) Math.sqrt(planes[o] * planes[o] + planes[o + 1] * planes[o + 1] + planes[o + 2] * planes[o + 2]);
+                if (l > 1e-6f) {
+                    planes[o] /= l;
+                    planes[o + 1] /= l;
+                    planes[o + 2] /= l;
+                    planes[o + 3] /= l;
+                }
+            }
+        }
+    }
+
+    private boolean inFrustum(ChunkManager.Chunk c) {
+        float cx = c.ox + 64f, cz = c.oz + 64f, cy = (c.minH + c.maxH) * 0.5f;
+        float hh = (c.maxH - c.minH) * 0.5f;
+        float r = (float) Math.sqrt(64f * 64f * 2f + hh * hh) + 2f;
+        for (int i = 0; i < 6; i++) {
+            int o = i * 4;
+            if (planes[o] * cx + planes[o + 1] * cy + planes[o + 2] * cz + planes[o + 3] < -r) return false;
+        }
+        return true;
     }
 
     private static float clamp(float v, float a, float b) {
@@ -453,7 +409,7 @@ public final class GameRenderer implements GLSurfaceView.Renderer {
         skyH[2] += 0.18f * dusk * 0.55f;
         mix3(ambS, 0.035f, 0.050f, 0.115f, 0.40f, 0.52f, 0.78f, day);
         mix3(ambG, 0.012f, 0.016f, 0.030f, 0.16f, 0.15f, 0.12f, day);
-        fogD = (Q == 0 ? 0.0045f : Q == 1 ? 0.0032f : 0.0024f) * (1f + dusk * 0.35f);
+        fogD = (3.3f / viewDist) * (1f + dusk * 0.35f);
     }
 
     private void common(Prog p) {
@@ -473,12 +429,10 @@ public final class GameRenderer implements GLSurfaceView.Renderer {
         p.f1("uSunVis", sunVis);
         p.f1("uFog", fogD);
         p.i1("uQ", Q);
-        p.f1("uShadowOn", Q > 0 ? 1f : 0f);
-        p.f1("uTexel", shadowSize > 0 ? 1f / shadowSize : 0f);
+        p.f1("uShadowOn", shadowOn ? 1f : 0f);
+        p.f1("uTexel", shadowOn ? 1f / shadowSize : 0f);
         p.mat4("uLightVP", lightVP);
         p.i1("uShadow", 1);
-        p.i1("uHeightTex", 2);
-        p.f1("uWorld", World.SIZE);
     }
 
     private void objDraw(Prog p, Geo g, int n, float cull, float sway, float bob, float fade,
@@ -508,7 +462,7 @@ public final class GameRenderer implements GLSurfaceView.Renderer {
         float texel = 2f * R / shadowSize;
         float sx = (float) Math.floor(tmpO[0] / texel + 0.5f) * texel;
         float sy = (float) Math.floor(tmpO[1] / texel + 0.5f) * texel;
-        Matrix.orthoM(lp, 0, sx - R, sx + R, sy - R, sy + R, 1f, dist + R + 200f);
+        Matrix.orthoM(lp, 0, sx - R, sx + R, sy - R, sy + R, 1f, dist + R + 250f);
         Matrix.multiplyMM(lightVP, 0, lp, 0, lv, 0);
 
         GLES30.glActiveTexture(GLES30.GL_TEXTURE1);
@@ -525,17 +479,23 @@ public final class GameRenderer implements GLSurfaceView.Renderer {
 
         pShTerr.use();
         pShTerr.mat4("uLightVP", lightVP);
-        GLES30.glBindVertexArray(tVao);
-        GLES30.glDrawElements(GLES30.GL_TRIANGLES, tIdx, GLES30.GL_UNSIGNED_INT, 0);
+        float lim = R + 220f;
+        for (ChunkManager.Chunk c : cm.chunks.values()) {
+            float dx = c.ox + 64f - cx, dz = c.oz + 64f - cz;
+            if (dx * dx + dz * dz > lim * lim) continue;
+            pShTerr.f2("uChunk", c.ox, c.oz);
+            GLES30.glBindVertexArray(c.vao);
+            GLES30.glDrawElements(GLES30.GL_TRIANGLES, cm.totalIdx[c.lod], GLES30.GL_UNSIGNED_SHORT, 0);
+        }
 
         pShObj.use();
         pShObj.mat4("uLightVP", lightVP);
         pShObj.f3("uCam", game.px, game.camY(), game.pz);
         pShObj.f1("uTime", game.time);
         float c = R + 25f;
-        objDraw(pShObj, gPine, world.nPines, c, 1f, 0f, 0f, 0f, 0f, 0f, 0f, 0f);
-        objDraw(pShObj, gOak, world.nOaks, c, 1f, 0f, 0f, 0f, 0f, 0f, 0f, 0f);
-        objDraw(pShObj, gRock, world.nRocks, c, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f);
+        objDraw(pShObj, gPine, cm.nP, c, 1f, 0f, 0f, 0f, 0f, 0f, 0f, 0f);
+        objDraw(pShObj, gOak, cm.nO, c, 1f, 0f, 0f, 0f, 0f, 0f, 0f, 0f);
+        objDraw(pShObj, gRock, cm.nR, c, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f);
         if (game.nWraith > 0) {
             gWraith.setInstances(game.wraithInst, game.nWraith);
             objDraw(pShObj, gWraith, game.nWraith, c, 0f, 0.08f, 0f, 0f, 0f, 0f, 0f, 0f);
@@ -543,6 +503,10 @@ public final class GameRenderer implements GLSurfaceView.Renderer {
         if (game.nBrute > 0) {
             gBrute.setInstances(game.bruteInst, game.nBrute);
             objDraw(pShObj, gBrute, game.nBrute, c, 0f, 0.05f, 0f, 0f, 0f, 0f, 0f, 0f);
+        }
+        if (game.nAvatar > 0) {
+            gAvatar.setInstances(game.avatarInst, game.nAvatar);
+            objDraw(pShObj, gAvatar, game.nAvatar, c, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f);
         }
         GLES30.glDisable(GLES30.GL_POLYGON_OFFSET_FILL);
         GLES30.glBindVertexArray(0);
@@ -559,9 +523,7 @@ public final class GameRenderer implements GLSurfaceView.Renderer {
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT | GLES30.GL_DEPTH_BUFFER_BIT);
 
         GLES30.glActiveTexture(GLES30.GL_TEXTURE1);
-        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, Q > 0 ? texShadow : 0);
-        GLES30.glActiveTexture(GLES30.GL_TEXTURE2);
-        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, texHeight);
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, shadowOn ? texShadow : 0);
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0);
 
         // sky
@@ -573,23 +535,26 @@ public final class GameRenderer implements GLSurfaceView.Renderer {
         GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 0, 3);
         GLES30.glEnable(GLES30.GL_DEPTH_TEST);
 
-        // terrain
+        // terrain chunks
         pTerr.use();
         common(pTerr);
         pTerr.mat4("uVP", vp);
-        GLES30.glBindVertexArray(tVao);
-        GLES30.glDrawElements(GLES30.GL_TRIANGLES, tIdx, GLES30.GL_UNSIGNED_INT, 0);
+        for (ChunkManager.Chunk c : cm.chunks.values()) {
+            if (!inFrustum(c)) continue;
+            pTerr.f2("uChunk", c.ox, c.oz);
+            GLES30.glBindVertexArray(c.vao);
+            GLES30.glDrawElements(GLES30.GL_TRIANGLES, cm.totalIdx[c.lod], GLES30.GL_UNSIGNED_SHORT, 0);
+        }
 
         // objects
         pObj.use();
         common(pObj);
         pObj.mat4("uVP", vp);
-        float tc = Q == 0 ? 170f : Q == 1 ? 240f : 320f;
-        objDraw(pObj, gPine, world.nPines, tc, 1f, 0f, 0f, 0.9f, 0f, 0.35f, 0f, 0f);
-        objDraw(pObj, gOak, world.nOaks, tc, 1f, 0f, 0f, 0.9f, 0f, 0.35f, 0f, 0f);
-        objDraw(pObj, gRock, world.nRocks, tc, 0f, 0f, 0f, 0.85f, 0f, 0f, 0f, 0f);
+        objDraw(pObj, gPine, cm.nP, treeCull, 1f, 0f, 0f, 0.9f, 0f, 0.35f, 0f, 0f);
+        objDraw(pObj, gOak, cm.nO, treeCull, 1f, 0f, 0f, 0.9f, 0f, 0.35f, 0f, 0f);
+        objDraw(pObj, gRock, cm.nR, treeCull, 0f, 0f, 0f, 0.85f, 0f, 0f, 0f, 0f);
         if (gGrass != null) {
-            objDraw(pObj, gGrass, world.nGrass, Q == 1 ? 38f : 62f, 35f, 0f, 1f, 0.8f, 0f, 0.5f, 0f, 1f);
+            objDraw(pObj, gGrass, cm.nG, grassCull, 35f, 0f, 1f, 0.8f, 0f, 0.5f, 0f, 1f);
         }
         if (game.nCrystal > 0) {
             gCrystal.setInstances(game.crystalInst, game.nCrystal);
@@ -603,20 +568,28 @@ public final class GameRenderer implements GLSurfaceView.Renderer {
             gBrute.setInstances(game.bruteInst, game.nBrute);
             objDraw(pObj, gBrute, game.nBrute, 400f, 0f, 0.05f, 0f, 0.6f, 0f, 0.2f, 3f, 0f);
         }
+        if (game.nAvatar > 0) {
+            gAvatar.setInstances(game.avatarInst, game.nAvatar);
+            objDraw(pObj, gAvatar, game.nAvatar, 600f, 0f, 0f, 0f, 0.6f, 0.1f, 0.2f, 1.5f, 0f);
+        }
         if (game.nBolt > 0) {
             gBolt.setInstances(game.boltInst, game.nBolt);
-            objDraw(pObj, gBolt, game.nBolt, 400f, 0f, 0f, 0f, 0.3f, 0f, 0f, 4f, 0f);
+            objDraw(pObj, gBolt, game.nBolt, 500f, 0f, 0f, 0f, 0.3f, 0f, 0f, 4f, 0f);
         }
 
-        // water
+        // water (per chunk, depth stored in the vertices)
         GLES30.glEnable(GLES30.GL_BLEND);
         GLES30.glBlendFunc(GLES30.GL_SRC_ALPHA, GLES30.GL_ONE_MINUS_SRC_ALPHA);
         GLES30.glDepthMask(false);
         pWater.use();
         common(pWater);
         pWater.mat4("uVP", vp);
-        GLES30.glBindVertexArray(waterVao);
-        GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4);
+        for (ChunkManager.Chunk c : cm.chunks.values()) {
+            if (!c.hasWater || c.wVao == 0 || !inFrustum(c)) continue;
+            pWater.f2("uChunk", c.ox, c.oz);
+            GLES30.glBindVertexArray(c.wVao);
+            GLES30.glDrawElements(GLES30.GL_TRIANGLES, cm.gridIdx[c.lod], GLES30.GL_UNSIGNED_SHORT, 0);
+        }
         GLES30.glDepthMask(true);
         GLES30.glDisable(GLES30.GL_BLEND);
 
@@ -653,7 +626,6 @@ public final class GameRenderer implements GLSurfaceView.Renderer {
         GLES30.glDisable(GLES30.GL_DEPTH_TEST);
         GLES30.glDisable(GLES30.GL_BLEND);
 
-        // bright pass (downsample)
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fboB1);
         GLES30.glViewport(0, 0, bw, bh);
         pBright.use();
@@ -663,7 +635,6 @@ public final class GameRenderer implements GLSurfaceView.Renderer {
         pBright.f2("uInv", 1.5f / W, 1.5f / H);
         fullscreen();
 
-        // blur H: B1 -> B2
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fboB2);
         pBlur.use();
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, texB1);
@@ -671,13 +642,11 @@ public final class GameRenderer implements GLSurfaceView.Renderer {
         pBlur.f2("uDir", 1.5f / bw, 0f);
         fullscreen();
 
-        // blur V: B2 -> B1
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fboB1);
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, texB2);
         pBlur.f2("uDir", 0f, 1.5f / bh);
         fullscreen();
 
-        // sun screen position for god rays
         float sxu = 0.5f, syu = 0.5f, shaft = 0f;
         tmp4[0] = game.px + sunD[0] * 1000f;
         tmp4[1] = game.camY() + sunD[1] * 1000f;
@@ -692,7 +661,6 @@ public final class GameRenderer implements GLSurfaceView.Renderer {
             shaft = sunVis * clamp(1.3f - (float) Math.sqrt(dx * dx + dy * dy) * 1.1f, 0f, 1f) * 0.9f;
         }
 
-        // composite
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0);
         GLES30.glViewport(0, 0, W, H);
         pComp.use();
@@ -719,7 +687,7 @@ public final class GameRenderer implements GLSurfaceView.Renderer {
         GLES30.glEnable(GLES30.GL_BLEND);
         GLES30.glBlendFunc(GLES30.GL_ONE, GLES30.GL_ONE_MINUS_SRC_ALPHA);
         hud.begin(aspect);
-        hud.draw(game, in, vp, fps, Q, game.time);
+        hud.draw(game, in, vp, fps, cfg, game.time, miniMap);
         hud.end();
         GLES30.glDisable(GLES30.GL_BLEND);
     }

@@ -1,0 +1,12 @@
+{
+  "name": "vinz-wilds-server",
+  "version": "2.0.0",
+  "description": "Multiplayer server for Vinz Wilds (runs in Termux, exposed via Cloudflare Tunnel)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

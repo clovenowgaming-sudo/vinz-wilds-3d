@@ -32,8 +32,18 @@ uniform float uShadowOn;
 uniform float uTexel;
 uniform sampler2DShadow uShadow;
 
-float hash21(vec2 p){ p = fract(p*vec2(123.34,456.21)); p += dot(p,p+45.32); return fract(p.x*p.y); }
-float hash31(vec3 p){ p = fract(p*vec3(0.1031,0.1030,0.0973)); p += dot(p,p.yxz+33.33); return fract((p.x+p.y)*p.z); }
+uint ihash(ivec2 p){
+  uint h = uint(p.x)*1597334673u ^ uint(p.y)*3812015801u;
+  h = (h ^ (h >> 16)) * 2246822519u;
+  h = (h ^ (h >> 13)) * 3266489917u;
+  h ^= h >> 16;
+  return h;
+}
+float hash21(vec2 p){ return float(ihash(ivec2(floor(p+0.5))) & 16777215u) / 16777215.0; }
+float hash31(vec3 p){
+  ivec3 q = ivec3(floor(p+0.5));
+  return float(ihash(ivec2(q.x*73856 + q.z*19349, q.y*83492 + q.z*5231)) & 16777215u) / 16777215.0;
+}
 float vnoise(vec2 p){
   vec2 i = floor(p); vec2 f = fract(p); f = f*f*(3.0-2.0*f);
   float a = hash21(i); float b = hash21(i+vec2(1.0,0.0));
@@ -138,34 +148,37 @@ vec3 applyFog(vec3 col, vec3 wpos){
   vec3 v = wpos - uCam;
   float d = length(v);
   float f = 1.0 - exp(-d*uFog);
-  float hf = exp(-max(wpos.y,0.0)*0.015);
+  float hf = exp(-max(wpos.y,0.0)*0.012);
   f = clamp(f*(0.55+0.45*hf),0.0,1.0);
   vec3 fc = skyBase(v/max(d,0.001));
   return mix(col, fc, f);
 }
 """;
 
-    // ------------------------------------------------------------------ terrain
+    // ------------------------------------------------------------------ terrain chunks
     static final String TERRAIN_VS = """
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec3 aNrm;
 uniform mat4 uVP;
 uniform mat4 uLightVP;
+uniform vec2 uChunk;
 out vec3 vWorld;
 out vec3 vNrm;
 out vec4 vSh;
 void main(){
-  vWorld = aPos;
+  vec3 wp = vec3(aPos.x + uChunk.x, aPos.y, aPos.z + uChunk.y);
+  vWorld = wp;
   vNrm = aNrm;
-  vSh = uLightVP*vec4(aPos+aNrm*0.25,1.0);
-  gl_Position = uVP*vec4(aPos,1.0);
+  vSh = uLightVP*vec4(wp+aNrm*0.25,1.0);
+  gl_Position = uVP*vec4(wp,1.0);
 }
 """;
 
     static final String SH_TERR_VS = """
 layout(location=0) in vec3 aPos;
 uniform mat4 uLightVP;
-void main(){ gl_Position = uLightVP*vec4(aPos,1.0); }
+uniform vec2 uChunk;
+void main(){ gl_Position = uLightVP*vec4(aPos.x + uChunk.x, aPos.y, aPos.z + uChunk.y, 1.0); }
 """;
 
     static final String TERRAIN_FS = """
@@ -179,6 +192,7 @@ void main(){
   float h = vWorld.y;
   vec2 p = vWorld.xz;
   float slope = 1.0 - N.y;
+  float macro = fbmN(p*0.0012, 3);
   float n1 = (uQ>0) ? fbmN(p*0.30,3) : vnoise(p*0.30);
   float n2 = vnoise(p*2.3);
   float n3 = (uQ>=2) ? vnoise(p*9.0) : 0.5;
@@ -190,15 +204,17 @@ void main(){
     N = normalize(N + vec3(-gx,0.0,-gz)*amp);
   }
   vec3 grass = mix(vec3(0.06,0.14,0.03), vec3(0.20,0.33,0.07), clamp(n1*1.1+n2*0.35,0.0,1.0));
+  grass = mix(grass, vec3(0.30,0.27,0.10), smoothstep(0.52,0.72,macro)*0.8);
+  grass = mix(grass, vec3(0.03,0.09,0.03), smoothstep(0.48,0.30,macro)*0.6);
   grass *= 0.85+0.3*n3;
-  grass = mix(grass, vec3(0.22,0.19,0.08), smoothstep(0.55,0.85,n1)*0.55);
+  grass = mix(grass, vec3(0.22,0.19,0.08), smoothstep(0.55,0.85,n1)*0.45);
   vec3 dirt = vec3(0.17,0.115,0.07)*(0.7+0.6*n2);
   vec3 sand = vec3(0.50,0.43,0.28)*(0.85+0.3*n2);
   vec3 rock = vec3(0.17,0.165,0.16)*(0.6+0.8*n1)*(0.8+0.4*n3);
   vec3 snow = vec3(0.80,0.84,0.90);
   float wSand = 1.0 - smoothstep(0.2,1.8,h + (n1-0.5)*1.6);
   float wRock = smoothstep(0.14,0.30,slope + (n2-0.5)*0.12);
-  float wSnow = smoothstep(40.0,52.0,h + (n1-0.5)*10.0)*(1.0-smoothstep(0.20,0.34,slope));
+  float wSnow = smoothstep(150.0,200.0,h + (n1-0.5)*30.0)*(1.0-smoothstep(0.20,0.34,slope));
   float wDirt = smoothstep(0.62,0.9,n2*0.6+n1*0.6)*0.5;
   vec3 alb = mix(grass, dirt, wDirt);
   alb = mix(alb, rock, wRock);
@@ -252,7 +268,7 @@ void main(){
   vec3 p = aPos*iPS.w;
   p.y *= mix(1.0, fade, uFadeScale);
   float hgt = max(p.y, 0.0);
-  float ph = iPS.x*0.37 + iPS.z*0.29;
+  float ph = mod(iPS.x*0.37 + iPS.z*0.29, 6.2831853);
   float k = uSway*hgt*hgt*0.004;
   p.x += sin(uTime*1.6+ph)*k;
   p.z += cos(uTime*1.3+ph*1.3)*k*0.7;
@@ -305,31 +321,37 @@ void main(){
 }
 """;
 
-    // ------------------------------------------------------------------ water
+    // ------------------------------------------------------------------ water (per chunk, depth in vertex)
     static final String WATER_VS = """
-layout(location=0) in vec3 aPos;
+layout(location=0) in vec3 aW;
 uniform mat4 uVP;
+uniform vec2 uChunk;
 out vec3 vWorld;
+out float vDepth;
 void main(){
-  vWorld = aPos;
-  gl_Position = uVP*vec4(aPos,1.0);
+  vec3 wp = vec3(aW.x + uChunk.x, 0.0, aW.y + uChunk.y);
+  vWorld = wp;
+  vDepth = aW.z;
+  gl_Position = uVP*vec4(wp,1.0);
 }
 """;
 
     static final String WATER_FS = """
 in vec3 vWorld;
-uniform sampler2D uHeightTex;
-uniform float uWorld;
+in float vDepth;
 out vec4 frag;
 float waveH(vec2 p){
   float t = uTime;
-  float h = sin(dot(p,vec2(0.8,0.6))*0.9+t*1.6)*0.5;
-  h += sin(dot(p,vec2(-0.6,0.8))*1.7+t*2.1)*0.25;
+  vec2 q = mod(p, 1024.0);
+  float kk = 6.2831853/1024.0;
+  float h = sin(dot(q,vec2(130.0,98.0))*kk+t*1.6)*0.5;
+  h += sin(dot(q,vec2(-110.0,150.0))*kk+t*2.1)*0.25;
   if(uQ>0) h += vnoise(p*0.8+vec2(t*0.5,t*0.3))*0.4;
   if(uQ>1) h += vnoise(p*3.0-t*vec2(0.8,0.5))*0.15;
   return h*0.5;
 }
 void main(){
+  if(vDepth < 0.0) discard;
   vec3 V = normalize(uCam - vWorld);
   float dist = length(uCam - vWorld);
   vec2 p = vWorld.xz;
@@ -339,8 +361,7 @@ void main(){
   float hz = waveH(p+vec2(0.0,e));
   vec3 N = normalize(vec3((h0-hx)/e*0.45, 1.0, (h0-hz)/e*0.45));
   N = normalize(mix(N, vec3(0.0,1.0,0.0), clamp(dist/260.0,0.0,1.0)));
-  float th = texture(uHeightTex, p/uWorld + 0.5).r;
-  float depth = max(-th, 0.0);
+  float depth = vDepth;
   vec3 R = reflect(-V,N);
   R.y = abs(R.y);
   vec3 refl = (uQ>0) ? skyFull(R) : skyBase(R);

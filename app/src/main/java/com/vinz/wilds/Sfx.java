@@ -12,6 +12,7 @@ final class Sfx {
     private static final int RATE = 22050;
     private static final AudioTrack[] tracks = new AudioTrack[6];
     private static boolean ready = false;
+    static volatile boolean enabled = true;
 
     private Sfx() {}
 
@@ -32,7 +33,7 @@ final class Sfx {
     }
 
     static void play(int id) {
-        if (!ready) return;
+        if (!ready || !enabled) return;
         try {
             AudioTrack t = tracks[id];
             if (t == null) return;

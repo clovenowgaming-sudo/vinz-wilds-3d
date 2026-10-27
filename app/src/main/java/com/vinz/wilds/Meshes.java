@@ -92,4 +92,18 @@ final class Meshes {
         b.box(-0.037f, 0.0f, 0.0f, 0.004f, 0.02f, 0.12f, 0.2f, 0.9f, 1.0f, 1f);
         return b;
     }
+
+    /** Other players in multiplayer. Faces +Z. */
+    static MeshBuilder avatar() {
+        MeshBuilder b = new MeshBuilder(91);
+        b.box(0f, 0.45f, 0f, 0.20f, 0.45f, 0.14f, 0.10f, 0.16f, 0.22f, 0f);      // legs
+        b.box(0f, 1.20f, 0f, 0.27f, 0.38f, 0.17f, 0.12f, 0.30f, 0.50f, 0f);      // torso
+        b.box(0f, 1.35f, -0.20f, 0.18f, 0.28f, 0.07f, 0.08f, 0.10f, 0.14f, 0f);  // backpack
+        b.box(0f, 1.38f, -0.275f, 0.05f, 0.18f, 0.01f, 0.2f, 0.9f, 1.0f, 1f);    // pack glow
+        b.box(-0.36f, 1.15f, 0.05f, 0.08f, 0.34f, 0.09f, 0.10f, 0.22f, 0.36f, 0f);
+        b.box(0.36f, 1.15f, 0.05f, 0.08f, 0.34f, 0.09f, 0.10f, 0.22f, 0.36f, 0f);
+        b.blob(0f, 1.86f, 0f, 0.20f, 0.22f, 0.20f, 5, 8, 0.75f, 0.62f, 0.52f, 0.05f, 0f);  // head
+        b.box(0f, 1.90f, 0.17f, 0.16f, 0.06f, 0.05f, 0.2f, 0.9f, 1.0f, 1f);      // visor
+        return b;
+    }
 }

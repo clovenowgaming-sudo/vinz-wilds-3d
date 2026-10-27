@@ -5,3 +5,6 @@ local.properties
 *.iml
 .idea/
 _dl/
+server/node_modules/
+server/*.log
+server/server.pid

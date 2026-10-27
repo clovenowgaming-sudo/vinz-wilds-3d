@@ -27,7 +27,7 @@ final class Hud {
     private float su, sv;
     private final float[] tin = new float[4], tout = new float[4];
 
-    void init(Bitmap minimap) {
+    void init() {
         prog = new Prog(Shaders.VH + Shaders.HUD_VS, Shaders.FH + Shaders.HUD_FS);
 
         Bitmap bmp = Bitmap.createBitmap(AW, AH, Bitmap.Config.ARGB_8888);
@@ -47,7 +47,9 @@ final class Hud {
         su = (lc * CW + CW / 2f) / AW;
         sv = (lr * CH + CH / 2f) / AH;
         atlas = makeTex(bmp);
-        mapTex = makeTex(minimap);
+        Bitmap blank = Bitmap.createBitmap(MiniMap.N, MiniMap.N, Bitmap.Config.ARGB_8888);
+        blank.eraseColor(0xFF0A1020);
+        mapTex = makeTex(blank);
 
         int[] t = new int[1];
         GLES30.glGenVertexArrays(1, t, 0);
@@ -77,6 +79,13 @@ final class Hud {
         GLUtils.texImage2D(GLES30.GL_TEXTURE_2D, 0, bmp, 0);
         bmp.recycle();
         return t[0];
+    }
+
+    /** Replace the minimap texture contents (GL thread). */
+    void uploadMap(Bitmap bmp) {
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0);
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, mapTex);
+        GLUtils.texSubImage2D(GLES30.GL_TEXTURE_2D, 0, 0, 0, bmp);
     }
 
     private void bindTex(int t) {
@@ -202,8 +211,26 @@ final class Hud {
         if (frac > 0f) quad(x, y, w * Math.min(1f, frac), h, r, g, b, 0.95f);
     }
 
-    void draw(Game g, Input in, float[] vp, float fps, int Q, float time) {
+    /** Projects a world point to HUD units. Returns false if off screen / behind camera. */
+    private boolean project(float[] vp, float x, float y, float z, float W, float[] out) {
+        tin[0] = x;
+        tin[1] = y;
+        tin[2] = z;
+        tin[3] = 1f;
+        Matrix.multiplyMV(tout, 0, vp, 0, tin, 0);
+        if (tout[3] <= 0.1f) return false;
+        float nx = tout[0] / tout[3], ny = tout[1] / tout[3];
+        if (nx < -1f || nx > 1f || ny < -1f || ny > 1f) return false;
+        out[0] = (nx * 0.5f + 0.5f) * W;
+        out[1] = (1f - (ny * 0.5f + 0.5f)) * Input.H;
+        return true;
+    }
+
+    private final float[] pt = new float[2];
+
+    void draw(Game g, Input in, float[] vp, float fps, Config cfg, float time, MiniMap mm) {
         float W = in.W, H = Input.H;
+        Net net = g.net;
 
         // ---- screen effects
         if (g.hurt > 0f) quad(0, 0, W, H, 0.9f, 0.05f, 0.05f, g.hurt * 0.35f);
@@ -215,17 +242,17 @@ final class Hud {
             if (!g.ealive[i]) continue;
             float dx = g.ex[i] - g.px, dz = g.ez[i] - g.pz;
             if (dx * dx + dz * dz > 40f * 40f) continue;
-            tin[0] = g.ex[i];
-            tin[1] = g.ey[i] + 2.9f * g.escale[i];
-            tin[2] = g.ez[i];
-            tin[3] = 1f;
-            Matrix.multiplyMV(tout, 0, vp, 0, tin, 0);
-            if (tout[3] <= 0.1f) continue;
-            float nx = tout[0] / tout[3], ny = tout[1] / tout[3];
-            if (nx < -1f || nx > 1f || ny < -1f || ny > 1f) continue;
-            float sx = (nx * 0.5f + 0.5f) * W, sy = (1f - (ny * 0.5f + 0.5f)) * H;
+            if (!project(vp, g.ex[i], g.ey[i] + 2.9f * g.escale[i], g.ez[i], W, pt)) continue;
             float w = 0.9f * g.escale[i];
-            bar(sx - w * 0.5f, sy, w, 0.09f, g.ehp[i] / g.emax[i], 0.9f, 0.15f, 0.15f);
+            bar(pt[0] - w * 0.5f, pt[1], w, 0.09f, g.ehp[i] / g.emax[i], 0.9f, 0.15f, 0.15f);
+        }
+
+        // ---- name tags of other players
+        for (int i = 0; i < g.nRemote; i++) {
+            float dx = g.rX[i] - g.px, dz = g.rZ[i] - g.pz;
+            if (dx * dx + dz * dz > 160f * 160f) continue;
+            if (!project(vp, g.rX[i], g.rY[i] + 2.35f, g.rZ[i], W, pt)) continue;
+            text(g.rName[i], pt[0], pt[1] - 0.3f, 0.3f, 0.5f, 1f, 0.9f, 1f, 1);
         }
 
         // ---- crosshair
@@ -245,7 +272,7 @@ final class Hud {
             line(cx + 0.30f, cy + 0.30f, cx + 0.14f, cy + 0.14f, 0.05f, 1f, 0.2f, 0.2f, a);
         }
 
-        // ---- minimap
+        // ---- minimap (local window around the player)
         float ms = 2.6f, mx = 0.35f, my = 0.35f;
         quad(mx - 0.07f, my - 0.07f, ms + 0.14f, ms + 0.14f, 0.02f, 0.03f, 0.05f, 0.8f);
         flush();
@@ -253,21 +280,28 @@ final class Hud {
         quadUV(mx, my, ms, ms, 0f, 0f, 1f, 1f, 1f, 1f, 1f, 1f);
         flush();
         bindTex(atlas);
-        for (int i = 0; i < Game.NC; i++) {
-            if (g.got[i]) continue;
-            float u = (g.world.crystals[i * 3] + World.HALF) / World.SIZE;
-            float v = 1f - (g.world.crystals[i * 3 + 2] + World.HALF) / World.SIZE;
+        for (int i = 0; i < g.nMapCrys; i++) {
+            float u = (g.mapCrys[i * 2] - mm.cx) / MiniMap.SPAN + 0.5f;
+            float v = 0.5f - (g.mapCrys[i * 2 + 1] - mm.cz) / MiniMap.SPAN;
+            if (u < 0f || u > 1f || v < 0f || v > 1f) continue;
             circle(mx + u * ms, my + v * ms, 0.07f, 8, 1f, 0.85f, 0.2f, 1f);
         }
         for (int i = 0; i < Game.MAXE; i++) {
             if (!g.ealive[i]) continue;
-            float u = (g.ex[i] + World.HALF) / World.SIZE;
-            float v = 1f - (g.ez[i] + World.HALF) / World.SIZE;
+            float u = (g.ex[i] - mm.cx) / MiniMap.SPAN + 0.5f;
+            float v = 0.5f - (g.ez[i] - mm.cz) / MiniMap.SPAN;
+            if (u < 0f || u > 1f || v < 0f || v > 1f) continue;
             circle(mx + u * ms, my + v * ms, 0.06f, 6, 1f, 0.15f, 0.15f, 1f);
         }
+        for (int i = 0; i < g.nRemote; i++) {
+            float u = (g.rX[i] - mm.cx) / MiniMap.SPAN + 0.5f;
+            float v = 0.5f - (g.rZ[i] - mm.cz) / MiniMap.SPAN;
+            if (u < 0f || u > 1f || v < 0f || v > 1f) continue;
+            circle(mx + u * ms, my + v * ms, 0.07f, 8, 0.3f, 0.6f, 1f, 1f);
+        }
         {
-            float u = (g.px + World.HALF) / World.SIZE;
-            float v = 1f - (g.pz + World.HALF) / World.SIZE;
+            float u = clamp01((g.px - mm.cx) / MiniMap.SPAN + 0.5f);
+            float v = clamp01(0.5f - (g.pz - mm.cz) / MiniMap.SPAN);
             float sx = mx + u * ms, sy = my + v * ms;
             float s0 = (float) Math.sin(g.yaw), c0 = (float) Math.cos(g.yaw);
             float s1 = (float) Math.sin(g.yaw + 2.5f), c1 = (float) Math.cos(g.yaw + 2.5f);
@@ -275,9 +309,10 @@ final class Hud {
             tri(sx + s0 * 0.22f, sy - c0 * 0.22f, sx + s1 * 0.15f, sy - c1 * 0.15f, sx + s2 * 0.15f, sy - c2 * 0.15f,
                     0.3f, 1f, 1f, 1f);
         }
+        text("X " + (int) g.px + "  Z " + (int) g.pz, mx, my + ms + 0.12f, 0.24f, 1f, 1f, 1f, 0.85f, 0);
 
         // ---- top center info
-        text("CRYSTALS " + g.crystalsGot + "/" + Game.NC, W * 0.5f, 0.2f, 0.46f, 0.5f, 0.95f, 1f, 1f, 1);
+        text("CRYSTALS " + g.crystalsGot, W * 0.5f, 0.2f, 0.46f, 0.5f, 0.95f, 1f, 1f, 1);
         int mins = (int) (((g.dayT * 24f + 6f) % 24f) * 60f);
         String clock = String.format("%02d:%02d", (mins / 60) % 24, mins % 60);
         text("DAY " + g.day + "  " + clock + "  KILLS " + g.kills, W * 0.5f, 0.72f, 0.30f, 1f, 1f, 1f, 0.9f, 1);
@@ -289,12 +324,25 @@ final class Hud {
             float r0 = (float) Math.sin(a - 2.5f), r1 = (float) -Math.cos(a - 2.5f);
             tri(ax + t0 * s, ay + t1 * s, ax + l0 * s * 0.7f, ay + l1 * s * 0.7f, ax + r0 * s * 0.7f, ay + r1 * s * 0.7f,
                     1f, 0.85f, 0.2f, 0.95f);
-            text((int) g.compassDist + " M", ax, ay + 0.42f, 0.26f, 1f, 0.9f, 0.4f, 0.95f, 1);
+            String dist = g.compassDist >= 1000f ? String.format("%.1f KM", g.compassDist / 1000f) : (int) g.compassDist + " M";
+            text(dist, ax, ay + 0.42f, 0.26f, 1f, 0.9f, 0.4f, 0.95f, 1);
         }
 
         // ---- top right
-        text("FPS " + (int) fps, W - 0.3f, 0.25f, 0.30f, 1f, 1f, 1f, 0.85f, 2);
-        text(QNAME[Q], W - 0.3f, 0.62f, 0.26f, 0.7f, 0.9f, 1f, 0.8f, 2);
+        float ty = 0.25f;
+        if (cfg.showFps) {
+            text("FPS " + (int) fps, W - 0.3f, ty, 0.30f, 1f, 1f, 1f, 0.85f, 2);
+            ty += 0.40f;
+        }
+        text(QNAME[cfg.q], W - 0.3f, ty, 0.26f, 0.7f, 0.9f, 1f, 0.8f, 2);
+        ty += 0.36f;
+        if (net != null) {
+            if (net.connected && net.welcomed) {
+                text("ONLINE " + net.online + (net.ping >= 0 ? "  " + net.ping + " MS" : ""), W - 0.3f, ty, 0.26f, 0.5f, 1f, 0.6f, 0.9f, 2);
+            } else {
+                text(net.status, W - 0.3f, ty, 0.26f, 1f, 0.6f, 0.3f, 0.95f, 2);
+            }
+        }
 
         // ---- bottom bars
         float bw = 6.4f, bx = W * 0.5f - bw * 0.5f;
@@ -322,7 +370,7 @@ final class Hud {
         // ---- message / overlays
         if (g.msgT > 0f && !g.dead) {
             float a = Math.min(1f, g.msgT);
-            text(g.msg, W * 0.5f, 2.55f, 0.55f, 1f, 1f, 1f, a, 1);
+            text(g.msg, W * 0.5f, 2.55f, 0.5f, 1f, 1f, 1f, a, 1);
         }
         if (g.dead) {
             quad(0, 0, W, H, 0.3f, 0f, 0f, 0.55f);
@@ -330,6 +378,10 @@ final class Hud {
             if (g.deadT > 1.2f) text("TAP TO RESPAWN", W * 0.5f, 5.4f, 0.55f, 1f, 1f, 1f, 0.9f, 1);
         }
         flush();
+    }
+
+    private static float clamp01(float v) {
+        return v < 0f ? 0f : Math.min(v, 1f);
     }
 
     private void button(float[] b, String label, boolean pressed) {

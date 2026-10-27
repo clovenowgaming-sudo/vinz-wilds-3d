@@ -4,11 +4,17 @@
 
 3D open-world survival shooter for Android (OpenGL ES 3.0), made from scratch.
 
-- Procedural island terrain, forests, rocks, grass, animated water, day/night cycle
-- 3 graphics presets: **LOW**, **MEDIUM**, **EXTREME**
-  - LOW: no shadows, 60% resolution (for weak devices, e.g. Helio P35 / 3 GB RAM)
-  - MEDIUM: 1K shadow map, MSAA 4x, clouds, grass
-  - EXTREME: 2K PCF shadows, bloom, god rays, FXAA, vignette, star sky
-- Collect 12 Aether Crystals, survive wraiths and brutes at night
+- Procedural world **64,000 x 64,000 m**, streamed in chunks (terrain LODs, forests, grass, water)
+- Single player and online multiplayer (Node.js server in `server/`)
+- Settings screen: LOW / MEDIUM / EXTREME presets, resolution, view distance, controls, audio
+- Collect Aether Crystals, survive wraiths at night, day/night cycle
 
-Build: push to `main`, GitHub Actions builds the APK (artifact `VinzWilds-APK`).
+## Build
+Push to `main`; GitHub Actions builds the APK (artifact `VinzWilds-APK`).
+
+## Server (Termux)
+```
+cd server && npm install && node server.js
+```
+Expose `http://localhost:8787` with a Cloudflare Tunnel public hostname, path `/wilds`.
+Game connects to `wss://<host>/wilds/ws`; status at `https://<host>/wilds/status`.

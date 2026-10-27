@@ -1,24 +1,26 @@
 package com.vinz.wilds;
 
-import java.util.ArrayList;
-import java.util.Random;
+import java.util.HashMap;
 
-/** Procedural island: heightfield, vegetation placement, crystals and tree collision. */
+/**
+ * Procedural 64,000 x 64,000 m world. Everything is a pure function of (x, z) so the
+ * client and the multiplayer server (server.js) always agree.
+ */
 final class World {
-    static final float SIZE = 640f;
-    static final float HALF = 320f;
-    static final int NC = 12;
-    private static final int CELL = 16;
-    private static final int GRID = (int) (SIZE / CELL);
+    static final float SIZE = 64000f;
+    static final float HALF = 32000f;
+    static final int CHUNK = 128;
+    static final int CCELL = 1024; // crystal cell size (m)
 
     final int quality;
-    float[] pines, oaks, rocks, grass;
-    int nPines, nOaks, nRocks, nGrass;
-    final float[] crystals = new float[NC * 3];
-    final float spawnX = 0f, spawnZ = 0f;
+    float spawnX = 0f, spawnZ = 0f;
 
-    @SuppressWarnings("unchecked")
-    private final ArrayList<float[]>[] cells = (ArrayList<float[]>[]) new ArrayList[GRID * GRID];
+    private final HashMap<Long, float[]> cc = new HashMap<>();
+    private static final float[] NONE = new float[0];
+
+    static long key(int a, int b) {
+        return ((long) a << 32) | (b & 0xFFFFFFFFL);
+    }
 
     // ---------------------------------------------------------------- noise
     private static float hash(int x, int y) {
@@ -55,19 +57,23 @@ final class World {
         return t * t * (3f - 2f * t);
     }
 
+    /** Terrain height in metres. Sea level = 0. Keep in sync with server.js. */
     float height(float x, float z) {
-        float r = (float) Math.sqrt(x * x + z * z);
-        float d = r / HALF;
-        float base = fbm(x * 0.0045f + 10f, z * 0.0045f + 10f, 5);
-        float h = (base - 0.45f) * 78f;
-        float mtn = fbm(x * 0.0022f - 30f, z * 0.0022f + 50f, 3);
-        float rg = 1f - Math.abs(2f * fbm(x * 0.008f + 5f, z * 0.008f - 7f, 4) - 1f);
-        h += smooth(0.50f, 0.70f, mtn) * rg * rg * 75f;
-        float e = smooth(0.50f, 1.0f, d);
-        h = h * (1f - e * 0.6f) - e * 42f;
-        float c = 1f - smooth(0f, 60f, r);
-        h = h * (1f - c) + (4.5f + (base - 0.45f) * 14f) * c;
-        return h;
+        float cont = fbm(x * 0.00006f + 3.1f, z * 0.00006f - 5.7f, 3);
+        float land = smooth(0.40f, 0.52f, cont);
+        float hills = (fbm(x * 0.0011f + 10f, z * 0.0011f + 10f, 5) - 0.45f) * 130f;
+        float det = (fbm(x * 0.012f + 40f, z * 0.012f - 9f, 3) - 0.5f) * 10f;
+        float mm = smooth(0.52f, 0.66f, fbm(x * 0.00025f - 30f, z * 0.00025f + 50f, 3));
+        float h;
+        if (mm > 0f) {
+            float rg = 1f - Math.abs(2f * fbm(x * 0.0022f + 5f, z * 0.0022f - 7f, 4) - 1f);
+            h = hills + det + mm * rg * rg * 260f + 4f;
+        } else {
+            h = hills + det + 4f;
+        }
+        h = h * land + (land - 1f) * 45f;
+        float e = smooth(0.86f, 1.0f, Math.max(Math.abs(x), Math.abs(z)) / HALF);
+        return h - e * 90f;
     }
 
     float slope(float x, float z) {
@@ -77,155 +83,69 @@ final class World {
         return (float) Math.sqrt(dx * dx + dz * dz) / (2f * e);
     }
 
-    // ----------------------------------------------------------- generation
+    // ---------------------------------------------------------------- setup
     World(int q) {
         quality = q;
-        Random r = new Random(20261025L);
-        int tp = q == 2 ? 2200 : q == 1 ? 900 : 350;
-        int to = q == 2 ? 1200 : q == 1 ? 500 : 200;
-        int tr = q == 2 ? 500 : q == 1 ? 250 : 120;
-        int tg = q == 2 ? 26000 : q == 1 ? 9000 : 0;
-        pines = new float[Math.max(1, tp) * 5];
-        oaks = new float[Math.max(1, to) * 5];
-        rocks = new float[Math.max(1, tr) * 5];
-        grass = new float[Math.max(1, tg) * 5];
-
-        int att = 0;
-        while (nPines < tp && att < tp * 60) {
-            att++;
-            float x = (r.nextFloat() * 2f - 1f) * (HALF - 20f);
-            float z = (r.nextFloat() * 2f - 1f) * (HALF - 20f);
-            float h = height(x, z);
-            if (h < 2.0f || h > 52f) continue;
-            if (x * x + z * z < 14f * 14f) continue;
-            float dens = fbm(x * 0.015f + 3f, z * 0.015f - 8f, 3);
-            float pref = smooth(8f, 22f, h);
-            if (dens < 0.42f + (1f - pref) * 0.16f) continue;
-            if (slope(x, z) > 0.75f) continue;
-            float s = 0.8f + r.nextFloat() * 0.9f;
-            put(pines, nPines++, x, h - 0.1f, z, s, r.nextFloat() * 6.283f);
-            addCircle(x, z, 0.5f * s);
-        }
-
-        att = 0;
-        while (nOaks < to && att < to * 60) {
-            att++;
-            float x = (r.nextFloat() * 2f - 1f) * (HALF - 20f);
-            float z = (r.nextFloat() * 2f - 1f) * (HALF - 20f);
-            float h = height(x, z);
-            if (h < 1.5f || h > 22f) continue;
-            if (x * x + z * z < 14f * 14f) continue;
-            float dens = fbm(x * 0.02f - 12f, z * 0.02f + 4f, 3);
-            if (dens < 0.50f) continue;
-            if (slope(x, z) > 0.55f) continue;
-            float s = 0.8f + r.nextFloat() * 0.7f;
-            put(oaks, nOaks++, x, h - 0.1f, z, s, r.nextFloat() * 6.283f);
-            addCircle(x, z, 0.5f * s);
-        }
-
-        att = 0;
-        while (nRocks < tr && att < tr * 40) {
-            att++;
-            float x = (r.nextFloat() * 2f - 1f) * (HALF - 20f);
-            float z = (r.nextFloat() * 2f - 1f) * (HALF - 20f);
-            float h = height(x, z);
-            if (h < -0.5f) continue;
-            if (x * x + z * z < 10f * 10f) continue;
-            if (slope(x, z) < 0.45f && r.nextFloat() > 0.22f) continue;
-            float s = 0.5f + r.nextFloat() * r.nextFloat() * 2.6f;
-            put(rocks, nRocks++, x, h - 0.15f * s, z, s, r.nextFloat() * 6.283f);
-            addCircle(x, z, 0.85f * s);
-        }
-
-        att = 0;
-        while (nGrass < tg && att < tg * 8) {
-            att++;
-            float x = (r.nextFloat() * 2f - 1f) * (HALF - 20f);
-            float z = (r.nextFloat() * 2f - 1f) * (HALF - 20f);
-            float h = height(x, z);
-            if (h < 1.0f || h > 32f) continue;
-            if (slope(x, z) > 0.6f) continue;
-            float dens = fbm(x * 0.03f + 40f, z * 0.03f - 9f, 2);
-            if (dens < 0.38f) continue;
-            put(grass, nGrass++, x, h - 0.02f, z, 0.7f + r.nextFloat() * 0.8f, r.nextFloat() * 6.283f);
-        }
-
-        placeCrystals(r);
+        findSpawn();
     }
 
-    private static void put(float[] a, int i, float x, float y, float z, float s, float rot) {
-        int o = i * 5;
-        a[o] = x;
-        a[o + 1] = y;
-        a[o + 2] = z;
-        a[o + 3] = s;
-        a[o + 4] = rot;
-    }
-
-    private void addCircle(float x, float z, float rad) {
-        int gx = (int) ((x + HALF) / CELL), gz = (int) ((z + HALF) / CELL);
-        if (gx < 0 || gz < 0 || gx >= GRID || gz >= GRID) return;
-        int k = gz * GRID + gx;
-        if (cells[k] == null) cells[k] = new ArrayList<>();
-        cells[k].add(new float[]{x, z, rad});
-    }
-
-    private void placeCrystals(Random r) {
-        int found = 0, tries = 0;
-        while (found < NC && tries < 6000) {
-            tries++;
-            float ang = r.nextFloat() * 6.2832f;
-            float rad = 45f + r.nextFloat() * 215f;
-            float x = (float) Math.cos(ang) * rad, z = (float) Math.sin(ang) * rad;
-            float h = height(x, z);
-            if (h < 2.5f || h > 55f || slope(x, z) > 0.6f) continue;
-            boolean ok = true;
-            for (int k = 0; k < found; k++) {
-                float dx = crystals[k * 3] - x, dz = crystals[k * 3 + 2] - z;
-                if (dx * dx + dz * dz < 55f * 55f) {
-                    ok = false;
-                    break;
-                }
-            }
-            if (!ok) continue;
-            crystals[found * 3] = x;
-            crystals[found * 3 + 1] = h + 1.1f;
-            crystals[found * 3 + 2] = z;
-            found++;
+    private boolean goodSpawn(float x, float z) {
+        float h = height(x, z);
+        if (h < 3f || h > 30f) return false;
+        if (slope(x, z) > 0.25f) return false;
+        for (int k = 0; k < 8; k++) {
+            float a = k * 0.785398f;
+            if (height(x + (float) Math.cos(a) * 100f, z + (float) Math.sin(a) * 100f) < 0.8f) return false;
         }
-        while (found < NC) {
-            float ang = found * 0.9f;
-            float rad = 30f + found * 12f;
-            float x = (float) Math.cos(ang) * rad, z = (float) Math.sin(ang) * rad;
-            crystals[found * 3] = x;
-            crystals[found * 3 + 1] = Math.max(height(x, z), 0.5f) + 1.1f;
-            crystals[found * 3 + 2] = z;
-            found++;
-        }
+        return true;
     }
 
-    /** Pushes (xz[0], xz[1]) out of nearby trees and rocks. */
-    void resolve(float[] xz, float pr) {
-        int cx = (int) ((xz[0] + HALF) / CELL), cz = (int) ((xz[1] + HALF) / CELL);
-        for (int dz = -1; dz <= 1; dz++) {
-            for (int dx = -1; dx <= 1; dx++) {
-                int gx = cx + dx, gz = cz + dz;
-                if (gx < 0 || gz < 0 || gx >= GRID || gz >= GRID) continue;
-                ArrayList<float[]> l = cells[gz * GRID + gx];
-                if (l == null) continue;
-                for (int i = 0; i < l.size(); i++) {
-                    float[] c = l.get(i);
-                    float ddx = xz[0] - c[0], ddz = xz[1] - c[1];
-                    float rr = c[2] + pr;
-                    float d2 = ddx * ddx + ddz * ddz;
-                    if (d2 < rr * rr && d2 > 1e-6f) {
-                        float d = (float) Math.sqrt(d2);
-                        float k = (rr - d) / d;
-                        xz[0] += ddx * k;
-                        xz[1] += ddz * k;
-                    }
+    private void findSpawn() {
+        for (int ring = 0; ring < 80; ring++) {
+            float rad = ring * 60f;
+            int n = ring == 0 ? 1 : 8 + ring * 4;
+            for (int k = 0; k < n; k++) {
+                float a = k * 6.2831853f / n;
+                float x = (float) Math.cos(a) * rad, z = (float) Math.sin(a) * rad;
+                if (goodSpawn(x, z)) {
+                    spawnX = x;
+                    spawnZ = z;
+                    return;
                 }
             }
         }
+    }
+
+    // ---------------------------------------------------------------- crystals
+    private static int ih(int a, int b, int c) {
+        int h = a * 374761393 + b * 668265263 + c * 1442695041;
+        h = (h ^ (h >>> 13)) * 1274126177;
+        return h ^ (h >>> 16);
+    }
+
+    /** Returns {x, y, z} of the crystal in a 1024 m cell, or null if the cell has none. */
+    synchronized float[] crystalCell(int ix, int iz) {
+        long k = key(ix, iz);
+        float[] r = cc.get(k);
+        if (r == null) {
+            r = NONE;
+            float rv = (ih(ix, iz, 11) & 0xFFFF) / 65535f;
+            if (rv < 0.5f) {
+                float fx = (ih(ix, iz, 12) & 0xFFFF) / 65535f;
+                float fz = (ih(ix, iz, 13) & 0xFFFF) / 65535f;
+                float x = (ix + 0.08f + 0.84f * fx) * CCELL;
+                float z = (iz + 0.08f + 0.84f * fz) * CCELL;
+                if (Math.abs(x) < HALF - 300f && Math.abs(z) < HALF - 300f) {
+                    float h = height(x, z);
+                    if (h > 2.5f && h < 180f && slope(x, z) < 0.7f) r = new float[]{x, h + 1.1f, z};
+                }
+            }
+            cc.put(k, r);
+        }
+        return r == NONE ? null : r;
+    }
+
+    static int cellOf(float v) {
+        return Math.floorDiv((int) Math.floor(v), CCELL);
     }
 }

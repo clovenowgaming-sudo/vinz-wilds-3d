@@ -10,8 +10,8 @@ android {
         applicationId 'com.vinz.wilds'
         minSdk 24
         targetSdk 34
-        versionCode 1
-        versionName '1.0'
+        versionCode 2
+        versionName '2.0'
     }
 
     buildTypes {
@@ -36,4 +36,8 @@ android {
             outputFileName = "VinzWilds-v${variant.versionName}.apk"
         }
     }
+}
+
+dependencies {
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
 }

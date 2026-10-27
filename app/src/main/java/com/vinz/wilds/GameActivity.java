@@ -7,6 +7,7 @@ import android.opengl.GLSurfaceView;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
@@ -20,7 +21,9 @@ public class GameActivity extends Activity {
     private GLSurfaceView glView;
     private final Input input = new Input();
     private TextView overlay;
+    private Net net;
     private boolean sized = false;
+    private boolean paused = true;
 
     /** Picks an ES3 config, tries MSAA first when requested, falls back gracefully. */
     private static final class Chooser implements GLSurfaceView.EGLConfigChooser {
@@ -59,18 +62,19 @@ public class GameActivity extends Activity {
             getWindow().getAttributes().layoutInDisplayCutoutMode =
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
         }
-        int q = getIntent().getIntExtra("q", 1);
-        if (q < 0) q = 0;
-        if (q > 2) q = 2;
-        final float scale = q == 0 ? 0.6f : q == 1 ? 0.85f : 1.0f;
+        boolean mp = getIntent().getBooleanExtra("mp", false);
+        final Config cfg = Config.load(this, mp);
+        Sfx.enabled = cfg.sound;
         Sfx.init();
+        if (mp) net = new Net(cfg.url, cfg.name);
+        final float scale = Math.max(0.4f, Math.min(1f, cfg.res));
 
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
 
         glView = new GLSurfaceView(this);
         glView.setEGLContextClientVersion(3);
-        glView.setEGLConfigChooser(new Chooser(q == 1 ? 4 : 0));
+        glView.setEGLConfigChooser(new Chooser(cfg.q == 1 ? 4 : 0));
         GameRenderer.Callback cb = new GameRenderer.Callback() {
             @Override
             public void ready() {
@@ -88,23 +92,33 @@ public class GameActivity extends Activity {
                     @Override
                     public void run() {
                         overlay.setVisibility(View.VISIBLE);
-                        overlay.setText("GRAPHICS ERROR\n\n" + s + "\n\nCoba kualitas yang lebih rendah.");
+                        overlay.setText("ERROR\n\n" + s + "\n\n(Back untuk keluar)");
+                    }
+                });
+            }
+
+            @Override
+            public void progress(final String s) {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        overlay.setText(s);
                     }
                 });
             }
         };
-        glView.setRenderer(new GameRenderer(q, input, cb));
+        glView.setRenderer(new GameRenderer(cfg, input, net, cb));
         glView.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
         glView.setOnTouchListener(new View.OnTouchListener() {
             @Override
-            public boolean onTouch(View v, android.view.MotionEvent e) {
+            public boolean onTouch(View v, MotionEvent e) {
                 input.onTouch(e);
                 return true;
             }
         });
         glView.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
             @Override
-            public void onLayoutChange(View v, int l, int t, int r, int bt, int ol, int ot, int or, int ob) {
+            public void onLayoutChange(View v, int l, int t, int r, int bt, int ol, int ot, int orr, int ob) {
                 final int w = r - l, h = bt - t;
                 if (w <= 0 || h <= 0) return;
                 input.setViewSize(w, h);
@@ -159,17 +173,22 @@ public class GameActivity extends Activity {
     protected void onResume() {
         super.onResume();
         glView.onResume();
+        if (net != null && paused) net.connect();
+        paused = false;
         immersive();
     }
 
     @Override
     protected void onPause() {
         glView.onPause();
+        if (net != null) net.pause();
+        paused = true;
         super.onPause();
     }
 
     @Override
     protected void onDestroy() {
+        if (net != null) net.close();
         Sfx.release();
         super.onDestroy();
     }
